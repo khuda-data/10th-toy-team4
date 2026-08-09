@@ -113,6 +113,7 @@ class WebApiTest(unittest.TestCase):
         self.assertEqual(routes.status_code, 200)
         self.assertEqual(routes.json()["items"][0]["route_id"], ROUTE_ID)
         self.assertEqual(routes.json()["items"][0]["station_count"], 2)
+        self.assertIsNotNone(routes.json()["items"][0]["first_collected_at"])
 
         stations = self.request(
             "GET",

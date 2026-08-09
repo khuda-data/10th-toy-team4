@@ -183,6 +183,7 @@ def create_app(settings: ApiSettings | None = None) -> FastAPI:
                 WITH runs AS (
                     SELECT
                         route_id,
+                        MIN(collected_at_kst) AS first_collected_at,
                         MAX(collected_at_kst) AS last_collected_at,
                         SUM(vehicle_count) AS observation_count
                     FROM collection_runs
@@ -196,6 +197,7 @@ def create_app(settings: ApiSettings | None = None) -> FastAPI:
                     runs.route_id,
                     COALESCE(stations.station_count, 0) AS station_count,
                     runs.observation_count,
+                    runs.first_collected_at,
                     runs.last_collected_at
                 FROM runs
                 LEFT JOIN stations ON stations.route_id = runs.route_id
