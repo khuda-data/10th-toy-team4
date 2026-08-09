@@ -1,0 +1,8 @@
+.env
+collector/config/routes.txt
+data/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
