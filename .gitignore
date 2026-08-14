@@ -6,3 +6,7 @@ __pycache__/
 .pytest_cache/
 .venv/
 venv/
+
+# GitHub의 파일당 100MB 제한을 넘는 Random Forest 모델은 로컬에만 보관합니다.
+temp_models/random_forest_model.joblib
+temp_models/random_forest_model.pkl

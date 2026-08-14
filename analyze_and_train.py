@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import pickle
 from pathlib import Path
 
 os.environ.setdefault("MPLCONFIGDIR", "/tmp/10th-toy-team4-matplotlib")
@@ -68,7 +69,7 @@ def parse_args() -> argparse.Namespace:
         description="다음 정류장 도착 잔여좌석 Ridge/Random Forest 비교"
     )
     parser.add_argument(
-        "--history", type=Path, default=Path("data/csv/history_219000013.csv")
+        "--history", type=Path, default=Path("data/csv/history_all.csv")
     )
     parser.add_argument(
         "--weather", type=Path, default=Path("data/csv/weather_log.csv")
@@ -270,16 +271,35 @@ def main() -> int:
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     all_metrics: dict[str, dict[str, float]] = {}
+    within_10_metrics: dict[str, dict[str, float]] = {}
     predictions = test[["observed_at", "vehicle_id", "station_seq", "next_station_seq", TARGET]].copy()
+    within_10_mask = test[TARGET].between(0, 10)
+    print(
+        f"저잔여석 테스트(실제 0~10석): {within_10_mask.sum():,}건 "
+        f"({within_10_mask.mean() * 100:.2f}%)"
+    )
     for name, model in models.items():
         model.fit(train[FEATURES], train[TARGET])
         prediction = np.clip(model.predict(test[FEATURES]), 0, None)
         metrics = evaluate(test[TARGET], prediction)
         all_metrics[name] = metrics
+        within_10_metrics[name] = evaluate(
+            test.loc[within_10_mask, TARGET], prediction[within_10_mask.to_numpy()]
+        )
         print_model_report(name, model, metrics)
         slug = "ridge" if name.startswith("Ridge") else "random_forest"
         predictions[f"{slug}_prediction"] = prediction.round(3)
         joblib.dump(model, args.output_dir / f"{slug}_model.joblib")
+        with (args.output_dir / f"{slug}_model.pkl").open("wb") as model_file:
+            pickle.dump(model, model_file, protocol=pickle.HIGHEST_PROTOCOL)
+
+    print(f"\n{'=' * 72}\n실제 잔여좌석 0~10석 테스트만 별도 평가\n{'=' * 72}")
+    for name, metrics in within_10_metrics.items():
+        print(f"\n{name}")
+        for key, value in metrics.items():
+            suffix = "%" if "accuracy" in key.lower() or "mape" in key.lower() else ""
+            shown = value * 100 if suffix else value
+            print(f"  {key:<28} {shown:>12.4f}{suffix}")
 
     report = {
         "problem": "next-station arrival remaining seats regression",
@@ -290,11 +310,20 @@ def main() -> int:
         "weather_coverage": round(float(data["weather_available"].mean()), 6),
         "parameters": {name: printable_params(model) for name, model in models.items()},
         "metrics": all_metrics,
+        "within_10_test": {
+            "definition": "0 <= actual arrival_remaining_seats <= 10",
+            "rows": int(within_10_mask.sum()),
+            "rate": round(float(within_10_mask.mean()), 6),
+            "metrics": within_10_metrics,
+        },
     }
     (args.output_dir / "model_report.json").write_text(
         json.dumps(report, ensure_ascii=False, indent=2, default=str), encoding="utf-8"
     )
     predictions.to_csv(args.output_dir / "predictions.csv", index=False, encoding="utf-8-sig")
+    predictions.loc[within_10_mask].to_csv(
+        args.output_dir / "predictions_within_10.csv", index=False, encoding="utf-8-sig"
+    )
 
     fig, ax = plt.subplots(figsize=(11, 5))
     chart = predictions.tail(min(500, len(predictions)))

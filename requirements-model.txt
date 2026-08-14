@@ -1,4 +1,5 @@
 -r requirements-client.txt
 joblib>=1.4,<2
+ipykernel>=6,<8
 matplotlib>=3.9,<4
 scikit-learn>=1.5,<2

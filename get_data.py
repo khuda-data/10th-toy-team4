@@ -19,6 +19,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="전체 이력을 받을 GBIS 노선 ID (생략하면 노선 목록과 최신 데이터만 받음)",
     )
     parser.add_argument(
+        "--all",
+        action="store_true",
+        help="서버에 있는 모든 노선의 전체 이력을 내려받음",
+    )
+    parser.add_argument(
         "--output-dir",
         type=Path,
         default=DEFAULT_OUTPUT_DIR,
@@ -35,6 +40,8 @@ def save_csv(dataframe, path: Path) -> None:
 
 def main() -> int:
     args = build_parser().parse_args()
+    if args.all and args.route_id:
+        raise SystemExit("노선 ID와 --all은 동시에 사용할 수 없습니다.")
     output_dir = args.output_dir
 
     try:
@@ -66,7 +73,7 @@ def main() -> int:
             save_csv(stations, output_dir / "stations.csv")
             save_csv(latest, output_dir / "latest_locations.csv")
 
-            if args.route_id is None:
+            if args.route_id is None and not args.all:
                 print("\n수집 가능한 노선 ID:")
                 if routes.empty:
                     print("  서버에 수집된 노선이 없습니다.")
@@ -79,14 +86,35 @@ def main() -> int:
                         )
                     print("\n과거 이력까지 받으려면 다음처럼 다시 실행하세요:")
                     print(f"  python get_data.py {routes.iloc[0]['route_id']}")
+                    print("전체 노선 이력을 받으려면 다음처럼 실행하세요:")
+                    print("  python get_data.py --all")
                 return 0
 
-            print(f"\n노선 {args.route_id}의 과거 이력을 갱신합니다...")
-            downloaded = cache.refresh_full_history(args.route_id)
-            history = cache.history_df(args.route_id)
-            save_csv(history, output_dir / f"history_{args.route_id}.csv")
-            print(f"새로 내려받은 이력: {downloaded:,}건")
-            return 0
+            route_ids = (
+                routes["route_id"].astype(str).tolist() if args.all else [args.route_id]
+            )
+            failures: list[tuple[str, str]] = []
+            total_downloaded = 0
+            for index, route_id in enumerate(route_ids, 1):
+                print(f"\n[{index}/{len(route_ids)}] 노선 {route_id}의 과거 이력을 갱신합니다...")
+                try:
+                    downloaded = cache.refresh_full_history(route_id)
+                    cache.checkpoint()
+                    history = cache.history_df(route_id)
+                    save_csv(history, output_dir / f"history_{route_id}.csv")
+                    total_downloaded += downloaded
+                    print(f"새로 내려받은 이력: {downloaded:,}건")
+                except GBISClientError as exc:
+                    failures.append((route_id, str(exc)))
+                    print(f"노선 {route_id} 실패: {exc}")
+
+            if args.all:
+                all_history = cache.history_df()
+                save_csv(all_history, output_dir / "history_all.csv")
+            print(f"\n전체 새 이력: {total_downloaded:,}건, 실패 노선: {len(failures)}개")
+            for route_id, message in failures:
+                print(f"  - {route_id}: {message}")
+            return 1 if failures else 0
     except (GBISClientError, ValueError) as exc:
         print(f"오류: {exc}")
         return 1
