@@ -1,4 +1,4 @@
-"""다음 정류장 도착 시 잔여좌석을 Ridge와 Random Forest로 예측한다."""
+"""Ridge로 다음 정류장 도착 잔여좌석을 예측한다."""
 
 from __future__ import annotations
 
@@ -15,17 +15,20 @@ import matplotlib
 import numpy as np
 import pandas as pd
 from sklearn.compose import ColumnTransformer
-from sklearn.ensemble import RandomForestRegressor
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import Ridge
 from sklearn.metrics import (
+    accuracy_score,
     explained_variance_score,
+    f1_score,
     max_error,
     mean_absolute_error,
     mean_absolute_percentage_error,
     mean_squared_error,
     median_absolute_error,
+    precision_score,
     r2_score,
+    recall_score,
 )
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
@@ -35,6 +38,9 @@ import matplotlib.pyplot as plt
 
 
 TARGET = "arrival_remaining_seats"
+LOW_SEAT_THRESHOLD = 10
+FULL_BUS_THRESHOLDS = (0.5, 1.0, 1.5, 2.0)
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 NUMERIC_FEATURES = [
     "remaining_seats",
     "station_seq",
@@ -66,20 +72,19 @@ FEATURES = NUMERIC_FEATURES + CATEGORICAL_FEATURES
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="다음 정류장 도착 잔여좌석 Ridge/Random Forest 비교"
+        description="다음 정류장 도착 잔여좌석 Ridge 예측"
     )
     parser.add_argument(
-        "--history", type=Path, default=Path("data/csv/history_all.csv")
+        "--history", type=Path, default=PROJECT_ROOT / "data/csv/history_all.csv"
     )
     parser.add_argument(
-        "--weather", type=Path, default=Path("data/csv/weather_log.csv")
+        "--weather", type=Path, default=PROJECT_ROOT / "data/csv/weather_log.csv"
     )
-    parser.add_argument("--output-dir", type=Path, default=Path("data/analysis/models"))
+    parser.add_argument(
+        "--output-dir", type=Path, default=PROJECT_ROOT / "data/analysis/models"
+    )
     parser.add_argument("--test-ratio", type=float, default=0.2)
     parser.add_argument("--ridge-alpha", type=float, default=10.0)
-    parser.add_argument("--rf-estimators", type=int, default=300)
-    parser.add_argument("--rf-max-depth", type=int, default=18)
-    parser.add_argument("--random-state", type=int, default=42)
     return parser.parse_args()
 
 
@@ -208,6 +213,34 @@ def evaluate(y_true: pd.Series, prediction: np.ndarray) -> dict[str, float]:
     return {key: round(float(value), 6) for key, value in result.items()}
 
 
+def evaluate_binary_classification(
+    actual_positive: np.ndarray, predicted_positive: np.ndarray
+) -> dict[str, float | int]:
+    """두 boolean 배열로 Accuracy, Precision, Recall과 F1을 계산한다."""
+    actual_positive = np.asarray(actual_positive, dtype=bool)
+    predicted_positive = np.asarray(predicted_positive, dtype=bool)
+    true_positive = int(np.sum(actual_positive & predicted_positive))
+    true_negative = int(np.sum(~actual_positive & ~predicted_positive))
+    false_positive = int(np.sum(~actual_positive & predicted_positive))
+    false_negative = int(np.sum(actual_positive & ~predicted_positive))
+    return {
+        "Accuracy": round(float(accuracy_score(actual_positive, predicted_positive)), 6),
+        "Precision": round(
+            float(precision_score(actual_positive, predicted_positive, zero_division=0)), 6
+        ),
+        "Recall": round(
+            float(recall_score(actual_positive, predicted_positive, zero_division=0)), 6
+        ),
+        "F1-score": round(
+            float(f1_score(actual_positive, predicted_positive, zero_division=0)), 6
+        ),
+        "True positive": true_positive,
+        "True negative": true_negative,
+        "False positive": false_positive,
+        "False negative": false_negative,
+    }
+
+
 def printable_params(model: Pipeline) -> dict[str, object]:
     params = model.named_steps["regressor"].get_params(deep=True)
     return {key: value for key, value in params.items() if not callable(value)}
@@ -241,19 +274,7 @@ def main() -> int:
     if test.empty:
         raise ValueError("테스트 데이터가 없습니다. 분할 비율을 확인하세요.")
 
-    models = {
-        "Ridge Regression": make_model(Ridge(alpha=args.ridge_alpha)),
-        "Random Forest Regression": make_model(
-            RandomForestRegressor(
-                n_estimators=args.rf_estimators,
-                max_depth=args.rf_max_depth,
-                min_samples_leaf=2,
-                max_features="sqrt",
-                n_jobs=-1,
-                random_state=args.random_state,
-            )
-        ),
-    }
+    models = {"Ridge Regression": make_model(Ridge(alpha=args.ridge_alpha))}
 
     print("=" * 72)
     print("다음 정류장 도착 잔여좌석 예측")
@@ -272,7 +293,19 @@ def main() -> int:
     args.output_dir.mkdir(parents=True, exist_ok=True)
     all_metrics: dict[str, dict[str, float]] = {}
     within_10_metrics: dict[str, dict[str, float]] = {}
-    predictions = test[["observed_at", "vehicle_id", "station_seq", "next_station_seq", TARGET]].copy()
+    low_seat_classification: dict[str, dict[str, float | int]] = {}
+    full_bus_classification: dict[str, dict[str, float | int]] = {}
+    full_bus_threshold_sweep: dict[str, dict[str, float | int]] = {}
+    predictions = test[
+        [
+            "observed_at",
+            "route_id",
+            "vehicle_id",
+            "station_seq",
+            "next_station_seq",
+            TARGET,
+        ]
+    ].copy()
     within_10_mask = test[TARGET].between(0, 10)
     print(
         f"저잔여석 테스트(실제 0~10석): {within_10_mask.sum():,}건 "
@@ -286,9 +319,29 @@ def main() -> int:
         within_10_metrics[name] = evaluate(
             test.loc[within_10_mask, TARGET], prediction[within_10_mask.to_numpy()]
         )
+        low_seat_classification[name] = evaluate_binary_classification(
+            np.asarray(test[TARGET]) <= LOW_SEAT_THRESHOLD,
+            prediction <= LOW_SEAT_THRESHOLD,
+        )
+        full_bus_classification[name] = evaluate_binary_classification(
+            np.asarray(test[TARGET]) == 0,
+            prediction < 0.5,
+        )
+        if name.startswith("Ridge"):
+            full_bus_threshold_sweep = {
+                f"{threshold:.1f}": evaluate_binary_classification(
+                    np.asarray(test[TARGET]) == 0,
+                    prediction < threshold,
+                )
+                for threshold in FULL_BUS_THRESHOLDS
+            }
         print_model_report(name, model, metrics)
-        slug = "ridge" if name.startswith("Ridge") else "random_forest"
+        slug = "ridge"
         predictions[f"{slug}_prediction"] = prediction.round(3)
+        predictions[f"{slug}_low_seat_prediction"] = (
+            prediction <= LOW_SEAT_THRESHOLD
+        ).astype(int)
+        predictions[f"{slug}_full_bus_prediction"] = (prediction < 0.5).astype(int)
         joblib.dump(model, args.output_dir / f"{slug}_model.joblib")
         with (args.output_dir / f"{slug}_model.pkl").open("wb") as model_file:
             pickle.dump(model, model_file, protocol=pickle.HIGHEST_PROTOCOL)
@@ -300,6 +353,32 @@ def main() -> int:
             suffix = "%" if "accuracy" in key.lower() or "mape" in key.lower() else ""
             shown = value * 100 if suffix else value
             print(f"  {key:<28} {shown:>12.4f}{suffix}")
+
+    classification_groups = (
+        (
+            f"잔여좌석 {LOW_SEAT_THRESHOLD}석 이하 위험 분류 평가",
+            low_seat_classification,
+        ),
+        ("만석(실제 0석, 예측 0.5석 미만) 분류 평가", full_bus_classification),
+    )
+    for title, group_metrics in classification_groups:
+        print(f"\n{'=' * 72}\n{title}\n{'=' * 72}")
+        for name, metrics in group_metrics.items():
+            print(f"\n{name}")
+            for key, value in metrics.items():
+                if key in {"Accuracy", "Precision", "Recall", "F1-score"}:
+                    print(f"  {key:<28} {float(value) * 100:>11.4f}%")
+                else:
+                    print(f"  {key:<28} {int(value):>12,}")
+
+    print(f"\n{'=' * 72}\nRidge 만석 경고 임계값 비교\n{'=' * 72}")
+    for threshold, metrics in full_bus_threshold_sweep.items():
+        print(f"\n예측값 < {threshold}석")
+        for key, value in metrics.items():
+            if key in {"Accuracy", "Precision", "Recall", "F1-score"}:
+                print(f"  {key:<28} {float(value) * 100:>11.4f}%")
+            else:
+                print(f"  {key:<28} {int(value):>12,}")
 
     report = {
         "problem": "next-station arrival remaining seats regression",
@@ -316,10 +395,35 @@ def main() -> int:
             "rate": round(float(within_10_mask.mean()), 6),
             "metrics": within_10_metrics,
         },
+        "low_seat_classification": {
+            "definition": (
+                f"positive when arrival_remaining_seats <= {LOW_SEAT_THRESHOLD}"
+            ),
+            "threshold": LOW_SEAT_THRESHOLD,
+            "metrics": low_seat_classification,
+        },
+        "full_bus_classification": {
+            "definition": (
+                "positive when actual arrival_remaining_seats == 0; "
+                "predicted positive when regression prediction < 0.5"
+            ),
+            "actual_threshold": 0,
+            "prediction_threshold": 0.5,
+            "metrics": full_bus_classification,
+        },
+        "full_bus_threshold_sweep": {
+            "actual_positive": "arrival_remaining_seats == 0",
+            "prediction_rule": "regression prediction < threshold",
+            "thresholds": full_bus_threshold_sweep,
+        },
     }
     (args.output_dir / "model_report.json").write_text(
         json.dumps(report, ensure_ascii=False, indent=2, default=str), encoding="utf-8"
     )
+    predictions["actual_low_seat"] = (
+        predictions[TARGET] <= LOW_SEAT_THRESHOLD
+    ).astype(int)
+    predictions["actual_full_bus"] = (predictions[TARGET] == 0).astype(int)
     predictions.to_csv(args.output_dir / "predictions.csv", index=False, encoding="utf-8-sig")
     predictions.loc[within_10_mask].to_csv(
         args.output_dir / "predictions_within_10.csv", index=False, encoding="utf-8-sig"
@@ -329,8 +433,7 @@ def main() -> int:
     chart = predictions.tail(min(500, len(predictions)))
     ax.plot(chart[TARGET].to_numpy(), label="Actual", linewidth=1.2)
     ax.plot(chart["ridge_prediction"].to_numpy(), label="Ridge", linewidth=1)
-    ax.plot(chart["random_forest_prediction"].to_numpy(), label="Random Forest", linewidth=1)
-    ax.set(title="Next-station remaining seats: actual vs predicted", ylabel="Seats")
+    ax.set(title="Next-station remaining seats: actual vs Ridge", ylabel="Seats")
     ax.legend()
     fig.tight_layout()
     fig.savefig(args.output_dir / "model_comparison.png", dpi=150)

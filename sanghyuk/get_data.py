@@ -3,10 +3,16 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
 
-DEFAULT_OUTPUT_DIR = Path("data/csv")
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "data/csv"
+DEFAULT_ENV_FILE = PROJECT_ROOT / ".env"
+DEFAULT_CACHE_PATH = PROJECT_ROOT / "data/gbis_api_cache.sqlite3"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -55,7 +61,10 @@ def main() -> int:
         return 1
 
     try:
-        with GBISApiCache.from_env() as cache:
+        with GBISApiCache.from_env(
+            env_file=DEFAULT_ENV_FILE,
+            cache_path=DEFAULT_CACHE_PATH,
+        ) as cache:
             print("노선·정류장·최신 위치 데이터를 갱신합니다...")
             counts = cache.refresh_all()
             print(
@@ -85,9 +94,12 @@ def main() -> int:
                             f"마지막 수집 {row.last_collected_at})"
                         )
                     print("\n과거 이력까지 받으려면 다음처럼 다시 실행하세요:")
-                    print(f"  python get_data.py {routes.iloc[0]['route_id']}")
+                    print(
+                        f"  {sys.executable} {Path(__file__).resolve()} "
+                        f"{routes.iloc[0]['route_id']}"
+                    )
                     print("전체 노선 이력을 받으려면 다음처럼 실행하세요:")
-                    print("  python get_data.py --all")
+                    print(f"  {sys.executable} {Path(__file__).resolve()} --all")
                 return 0
 
             route_ids = (
